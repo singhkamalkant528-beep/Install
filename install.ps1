@@ -289,6 +289,7 @@ try {
     Write-Host ''
     Write-Host '[6/8] Resolving and validating permitted domains...'
 
+    Clear-DnsClientCache
     $exactDomains = @($domains | Where-Object { -not $_.StartsWith('*') })
 
     foreach ($domain in $exactDomains) {
@@ -301,6 +302,29 @@ try {
     }
 
     Start-Sleep -Seconds 5
+
+    $requiredLoginDomains = @(
+        'cloudphone.tatateleservices.com',
+        'login.microsoftonline.com',
+        'aadcdn.msauth.net',
+        'aadcdn.msftauth.net'
+    )
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $missingLoginDomains = @($requiredLoginDomains | Where-Object {
+            $loginEntry = Get-NetFirewallDynamicKeywordAddress |
+                Where-Object Keyword -EQ $_ | Select-Object -First 1
+            -not $loginEntry -or [string]::IsNullOrWhiteSpace([string]$loginEntry.Addresses)
+        })
+        if ($missingLoginDomains.Count -eq 0) { break }
+        if ($attempt -eq 2) {
+            throw "Required login domains have no firewall addresses: $($missingLoginDomains -join ', ')."
+        }
+        Clear-DnsClientCache
+        foreach ($domain in $missingLoginDomains) {
+            Resolve-DnsName -Name $domain -DnsOnly -ErrorAction Stop | Out-Null
+        }
+        Start-Sleep -Seconds 5
+    }
 
     $resolvedDomains = @()
     $unresolvedDomains = @()
@@ -339,8 +363,9 @@ try {
     Write-Host ''
     Write-Host '[8/8] Testing permitted HTTPS access...'
 
-    $testDomains = @('google.com', 'chatgpt.com', 'gofinqo.com')
+    $testDomains = @('google.com', 'chatgpt.com', 'gofinqo.com') + $requiredLoginDomains
     $successfulTests = 0
+    $passedDomains = @()
 
     foreach ($domain in $testDomains) {
         $client = $null
@@ -352,6 +377,7 @@ try {
             if ($connected -and $client.Connected) {
                 Write-Host "Passed: $domain" -ForegroundColor Green
                 $successfulTests++
+                $passedDomains += $domain
             }
             else {
                 Write-Warning "Failed: $domain"
@@ -365,6 +391,11 @@ try {
                 $client.Dispose()
             }
         }
+    }
+
+    $failedLoginDomains = @($requiredLoginDomains | Where-Object { $_ -notin $passedDomains })
+    if ($failedLoginDomains.Count -gt 0) {
+        throw "Required login HTTPS tests failed: $($failedLoginDomains -join ', ')."
     }
 
     if ($successfulTests -eq 0) {
